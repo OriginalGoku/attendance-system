@@ -70,7 +70,8 @@ attendance_raspberry_pi/
 │       │   ├── base.py
 │       │   └── lease_file.py
 │       ├── services/
-│       │   └── attendance_engine.py
+│       │   ├── attendance_engine.py
+│       │   └── remote_sync.py
 │       └── utils/
 │           ├── __init__.py
 │           ├── mac.py
@@ -115,8 +116,48 @@ Edit `.env` and update:
 - `ATTENDANCE_EXIT_GRACE_PERIOD_SECONDS`
 - `ATTENDANCE_LOG_LEVEL`
 - `ATTENDANCE_TIMEZONE`
+- `ATTENDANCE_REMOTE_SYNC_ENABLED`
+- `ATTENDANCE_REMOTE_BASE_URL`
+- `ATTENDANCE_REMOTE_INGEST_TOKEN`
+- `ATTENDANCE_REMOTE_TIMEOUT_SECONDS`
 
 The default timezone in this scaffold is `America/Toronto`.
+
+## Remote Sync To `telegram_manager`
+
+The Pi remains responsible for local attendance detection and local MySQL persistence.
+An optional one-way sync can forward session boundary events to the remote `telegram_manager` app.
+
+Remote sync behavior:
+
+- session open sends `eventType: "in"`
+- session close sends `eventType: "out"`
+- entry idempotency key: `session-{session_id}-entry`
+- exit idempotency key: `session-{session_id}-exit`
+- exit `occurredAt` uses the session `last_seen` timestamp, not the grace-period close timestamp
+
+Remote sync configuration:
+
+```env
+ATTENDANCE_REMOTE_SYNC_ENABLED=true
+ATTENDANCE_REMOTE_BASE_URL=https://your-telegram-manager.example.com
+ATTENDANCE_REMOTE_INGEST_TOKEN=your-app-level-bearer-token
+ATTENDANCE_REMOTE_TIMEOUT_SECONDS=10
+```
+
+Remote request contract:
+
+- method: `POST`
+- URL: `https://<telegram-manager-base-url>/api/integrations/attendance-system/events`
+- header: `Authorization: Bearer <ATTENDANCE_SYSTEM_INGEST_SECRET>`
+
+If remote sync fails:
+
+- local MySQL attendance behavior still succeeds
+- the polling cycle continues
+- a structured error is logged
+
+If an employee has no `telegram_id`, remote sync is skipped and a warning is logged.
 
 ## MySQL Setup
 

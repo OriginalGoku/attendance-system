@@ -18,6 +18,10 @@ def assume_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc)
 
 
+def format_utc_timestamp(value: datetime) -> str:
+    return assume_utc(value).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def to_timezone(value: datetime, timezone_name: str | ZoneInfo) -> datetime:
     zone = ZoneInfo(timezone_name) if isinstance(timezone_name, str) else timezone_name
     return value.astimezone(zone)

@@ -79,6 +79,22 @@ class MysqlAttendanceStore:
                 rows = cursor.fetchall()
         return {row["mac_address"]: _employee_from_row(row) for row in rows}
 
+    def get_employee_by_id(self, employee_id: int) -> Employee | None:
+        with self.connection_factory.transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, name, telegram_id, mac_address, active, created_at
+                    FROM employees
+                    WHERE id = %s
+                    """,
+                    (employee_id,),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            return None
+        return _employee_from_row(row)
+
     def create_session(
         self,
         employee: Employee,

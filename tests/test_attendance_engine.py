@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
-from attendance_system.config import AppConfig, DatabaseConfig
+from attendance_system.config import AppConfig, DatabaseConfig, RemoteSyncConfig
 from attendance_system.models import AttendanceSession, DevicePresence, Employee
 from attendance_system.services.attendance_engine import AttendanceEngine
+from attendance_system.services.remote_sync import (
+    build_entry_payload,
+    build_exit_payload,
+)
 
 
 class FakePresenceSource:
@@ -44,6 +48,12 @@ class InMemoryStore:
             for mac in mac_addresses
             if (employee := self.employees.get(mac)) is not None and employee.active
         }
+
+    def get_employee_by_id(self, employee_id: int) -> Employee | None:
+        for employee in self.employees.values():
+            if employee.id == employee_id:
+                return employee
+        return None
 
     def create_session(
         self,
@@ -88,7 +98,11 @@ class InMemoryStore:
             if session.id == session_id:
                 session.status = "closed"
                 session.exit_time = exit_time
-        for mac in [mac for mac, session in self.open_sessions.items() if session.id == session_id]:
+        for mac in [
+            mac
+            for mac, session in self.open_sessions.items()
+            if session.id == session_id
+        ]:
             self.open_sessions.pop(mac, None)
 
     def close_stale_open_sessions(self, before: datetime, exit_time: datetime) -> int:
@@ -120,7 +134,34 @@ class InMemoryStore:
         )
 
 
-def make_config() -> AppConfig:
+class FakeRemoteSyncClient:
+    def __init__(self, *, raise_on_send: bool = False) -> None:
+        self.raise_on_send = raise_on_send
+        self.opened: list[tuple[int, str]] = []
+        self.closed: list[tuple[int, str, datetime]] = []
+
+    def send_session_opened(
+        self, session: AttendanceSession, employee: Employee
+    ) -> None:
+        if self.raise_on_send:
+            raise RuntimeError("remote sync failed")
+        if employee.telegram_id.strip():
+            self.opened.append((session.id, employee.telegram_id))
+
+    def send_session_closed(
+        self,
+        session: AttendanceSession,
+        employee: Employee,
+        *,
+        closed_at: datetime,
+    ) -> None:
+        if self.raise_on_send:
+            raise RuntimeError("remote sync failed")
+        if employee.telegram_id.strip():
+            self.closed.append((session.id, employee.telegram_id, closed_at))
+
+
+def make_config(*, remote_sync_enabled: bool = True) -> AppConfig:
     return AppConfig(
         database=DatabaseConfig(
             host="127.0.0.1",
@@ -136,6 +177,12 @@ def make_config() -> AppConfig:
         log_level="INFO",
         timezone_name="America/Toronto",
         log_unknown_devices=True,
+        remote_sync=RemoteSyncConfig(
+            enabled=remote_sync_enabled,
+            base_url="https://telegram-manager.example.com",
+            ingest_token="secret-token",
+            timeout_seconds=10,
+        ),
     )
 
 
@@ -164,12 +211,19 @@ def test_registered_device_opens_session_and_logs_entry() -> None:
     employee = make_employee()
     store.employees[employee.mac_address] = employee
     source = FakePresenceSource([make_device()])
-    engine = AttendanceEngine(config=make_config(), presence_source=source, store=store)
+    remote_sync = FakeRemoteSyncClient()
+    engine = AttendanceEngine(
+        config=make_config(),
+        presence_source=source,
+        store=store,
+        remote_sync=remote_sync,
+    )
 
     engine.run_cycle(datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc))
 
     assert len(store.open_sessions) == 1
     assert [event.event_type for event in store.events] == ["seen", "entry"]
+    assert remote_sync.opened == [(1, "123456789")]
 
 
 def test_grace_period_prevents_early_exit() -> None:
@@ -211,7 +265,13 @@ def test_device_absent_past_grace_closes_session() -> None:
     employee = make_employee()
     store.employees[employee.mac_address] = employee
     source = FakePresenceSource([make_device()])
-    engine = AttendanceEngine(config=make_config(), presence_source=source, store=store)
+    remote_sync = FakeRemoteSyncClient()
+    engine = AttendanceEngine(
+        config=make_config(),
+        presence_source=source,
+        store=store,
+        remote_sync=remote_sync,
+    )
     start = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
 
     engine.run_cycle(start)
@@ -221,6 +281,59 @@ def test_device_absent_past_grace_closes_session() -> None:
 
     assert len(store.open_sessions) == 0
     assert store.events[-1].event_type == "exit"
+    assert remote_sync.closed[0][0] == 1
+    assert remote_sync.closed[0][1] == "123456789"
+
+
+def test_entry_payload_uses_entry_time_and_stable_source_event_id() -> None:
+    employee = make_employee()
+    entry_time = datetime(2026, 3, 10, 13, 5, 12, tzinfo=timezone.utc)
+    session = AttendanceSession(
+        id=481,
+        employee_id=employee.id,
+        mac_address=employee.mac_address,
+        ip_address="192.168.50.20",
+        hostname="john-iphone",
+        entry_time=entry_time,
+        last_seen=entry_time,
+        exit_time=None,
+        status="open",
+        created_at=entry_time,
+        updated_at=entry_time,
+    )
+
+    payload = build_entry_payload(session, employee)
+
+    assert payload["sourceEventId"] == "session-481-entry"
+    assert payload["eventType"] == "in"
+    assert payload["occurredAt"] == "2026-03-10T13:05:12.000Z"
+
+
+def test_exit_payload_uses_last_seen_not_close_time() -> None:
+    employee = make_employee()
+    entry_time = datetime(2026, 3, 10, 13, 5, 12, tzinfo=timezone.utc)
+    last_seen = datetime(2026, 3, 10, 18, 10, 0, tzinfo=timezone.utc)
+    closed_at = datetime(2026, 3, 10, 18, 12, 0, tzinfo=timezone.utc)
+    session = AttendanceSession(
+        id=481,
+        employee_id=employee.id,
+        mac_address=employee.mac_address,
+        ip_address="192.168.50.20",
+        hostname="john-iphone",
+        entry_time=entry_time,
+        last_seen=last_seen,
+        exit_time=closed_at,
+        status="closed",
+        created_at=entry_time,
+        updated_at=closed_at,
+    )
+
+    payload = build_exit_payload(session, employee, closed_at=closed_at)
+
+    assert payload["sourceEventId"] == "session-481-exit"
+    assert payload["eventType"] == "out"
+    assert payload["occurredAt"] == "2026-03-10T18:10:00.000Z"
+    assert payload["metadata"]["closedAt"] == "2026-03-10T18:12:00.000Z"
 
 
 def test_unknown_device_is_logged_without_session() -> None:
@@ -258,3 +371,39 @@ def test_repeated_poll_is_idempotent_for_open_sessions() -> None:
     assert len(store.open_sessions) == 1
     entry_events = [event for event in store.events if event.event_type == "entry"]
     assert len(entry_events) == 1
+
+
+def test_missing_telegram_id_skips_remote_sync() -> None:
+    store = InMemoryStore()
+    employee = replace(make_employee(), telegram_id="")
+    store.employees[employee.mac_address] = employee
+    source = FakePresenceSource([make_device()])
+    remote_sync = FakeRemoteSyncClient()
+    engine = AttendanceEngine(
+        config=make_config(),
+        presence_source=source,
+        store=store,
+        remote_sync=remote_sync,
+    )
+
+    engine.run_cycle(datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc))
+
+    assert remote_sync.opened == []
+
+
+def test_remote_sync_failure_does_not_stop_polling_cycle() -> None:
+    store = InMemoryStore()
+    employee = make_employee()
+    store.employees[employee.mac_address] = employee
+    source = FakePresenceSource([make_device()])
+    remote_sync = FakeRemoteSyncClient(raise_on_send=True)
+    engine = AttendanceEngine(
+        config=make_config(),
+        presence_source=source,
+        store=store,
+        remote_sync=remote_sync,
+    )
+
+    engine.run_cycle(datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc))
+
+    assert len(store.open_sessions) == 1

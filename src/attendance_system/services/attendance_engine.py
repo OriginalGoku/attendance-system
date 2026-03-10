@@ -5,9 +5,9 @@ import time
 from datetime import datetime, timedelta
 
 from attendance_system.config import AppConfig
-from attendance_system.models import AttendanceSession, DevicePresence
+from attendance_system.models import AttendanceSession, DevicePresence, Employee
 from attendance_system.presence.base import PresenceSource
-from attendance_system.types import AttendanceStore
+from attendance_system.types import AttendanceStore, RemoteAttendanceSync
 from attendance_system.utils.time import now_utc
 
 logger = logging.getLogger(__name__)
@@ -22,10 +22,12 @@ class AttendanceEngine:
         config: AppConfig,
         presence_source: PresenceSource,
         store: AttendanceStore,
+        remote_sync: RemoteAttendanceSync | None = None,
     ) -> None:
         self.config = config
         self.presence_source = presence_source
         self.store = store
+        self.remote_sync = remote_sync
         self.pending_exits: dict[str, datetime] = {}
 
     def run_cycle(self, current_time: datetime | None = None) -> None:
@@ -95,6 +97,7 @@ class AttendanceEngine:
                         "mac_address": mac_address,
                     },
                 )
+                self._best_effort_sync_open(session, employee)
             else:
                 self.store.touch_session(
                     session_id=existing_session.id,
@@ -153,6 +156,7 @@ class AttendanceEngine:
                 continue
 
             if cycle_time - missing_since >= grace_period:
+                employee = self.store.get_employee_by_id(session.employee_id)
                 self.store.close_session(session.id, cycle_time)
                 self.store.log_raw_event(
                     employee_id=session.employee_id,
@@ -167,6 +171,10 @@ class AttendanceEngine:
                     },
                 )
                 self.pending_exits.pop(mac_address, None)
+                if employee is not None:
+                    self._best_effort_sync_close(
+                        session, employee, closed_at=cycle_time
+                    )
                 logger.info(
                     "Closed attendance session.",
                     extra={
@@ -176,8 +184,44 @@ class AttendanceEngine:
                     },
                 )
 
+    def _best_effort_sync_open(
+        self, session: AttendanceSession, employee: Employee
+    ) -> None:
+        if self.remote_sync is None:
+            return
+        try:
+            self.remote_sync.send_session_opened(session, employee)
+        except Exception:
+            logger.exception(
+                "Remote attendance sync raised unexpectedly during session open.",
+                extra={"session_id": session.id, "employee_id": employee.id},
+            )
+
+    def _best_effort_sync_close(
+        self,
+        session: AttendanceSession,
+        employee: Employee,
+        *,
+        closed_at: datetime,
+    ) -> None:
+        if self.remote_sync is None:
+            return
+        try:
+            self.remote_sync.send_session_closed(
+                session,
+                employee,
+                closed_at=closed_at,
+            )
+        except Exception:
+            logger.exception(
+                "Remote attendance sync raised unexpectedly during session close.",
+                extra={"session_id": session.id, "employee_id": employee.id},
+            )
+
     @staticmethod
-    def _deduplicate_devices(devices: list[DevicePresence]) -> dict[str, DevicePresence]:
+    def _deduplicate_devices(
+        devices: list[DevicePresence],
+    ) -> dict[str, DevicePresence]:
         deduplicated: dict[str, DevicePresence] = {}
         for device in devices:
             deduplicated[device.mac_address] = device

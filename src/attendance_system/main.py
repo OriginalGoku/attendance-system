@@ -55,6 +55,12 @@ def build_store(config: AppConfig) -> MysqlAttendanceStore:
     return MysqlAttendanceStore(DatabaseConnectionFactory(config.database))
 
 
+def build_remote_sync_client(config: AppConfig) -> RemoteAttendanceSyncClient:
+    from attendance_system.services.remote_sync import RemoteAttendanceSyncClient
+
+    return RemoteAttendanceSyncClient(config.remote_sync)
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -102,6 +108,7 @@ def main() -> int:
         config=config,
         presence_source=build_presence_source(config),
         store=store,
+        remote_sync=build_remote_sync_client(config),
     )
 
     if args.command == "run-once":

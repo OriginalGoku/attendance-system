@@ -50,6 +50,21 @@ class DatabaseConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class RemoteSyncConfig:
+    enabled: bool
+    base_url: str
+    ingest_token: str
+    timeout_seconds: int
+
+    def sanitized(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "base_url": self.base_url,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+
+@dataclass(slots=True, frozen=True)
 class AppConfig:
     database: DatabaseConfig
     presence_source: str
@@ -59,6 +74,7 @@ class AppConfig:
     log_level: str
     timezone_name: str
     log_unknown_devices: bool
+    remote_sync: RemoteSyncConfig
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -79,6 +95,7 @@ class AppConfig:
             "timezone_name": self.timezone_name,
             "log_unknown_devices": self.log_unknown_devices,
             "database": self.database.sanitized(),
+            "remote_sync": self.remote_sync.sanitized(),
         }
 
     @classmethod
@@ -91,6 +108,12 @@ class AppConfig:
             user=os.getenv("ATTENDANCE_DB_USER", "attendance_user"),
             password=os.getenv("ATTENDANCE_DB_PASSWORD", ""),
             name=os.getenv("ATTENDANCE_DB_NAME", "attendance_system"),
+        )
+        remote_sync = RemoteSyncConfig(
+            enabled=_get_bool("ATTENDANCE_REMOTE_SYNC_ENABLED", False),
+            base_url=os.getenv("ATTENDANCE_REMOTE_BASE_URL", "").strip(),
+            ingest_token=os.getenv("ATTENDANCE_REMOTE_INGEST_TOKEN", "").strip(),
+            timeout_seconds=_get_int("ATTENDANCE_REMOTE_TIMEOUT_SECONDS", 10),
         )
         config = cls(
             database=database,
@@ -108,6 +131,7 @@ class AppConfig:
             log_level=os.getenv("ATTENDANCE_LOG_LEVEL", "INFO").upper(),
             timezone_name=os.getenv("ATTENDANCE_TIMEZONE", "America/Toronto"),
             log_unknown_devices=_get_bool("ATTENDANCE_LOG_UNKNOWN_DEVICES", True),
+            remote_sync=remote_sync,
         )
         config.validate()
         return config
@@ -125,6 +149,19 @@ class AppConfig:
             raise ConfigError(
                 "ATTENDANCE_EXIT_GRACE_PERIOD_SECONDS cannot be negative."
             )
+        if self.remote_sync.timeout_seconds <= 0:
+            raise ConfigError(
+                "ATTENDANCE_REMOTE_TIMEOUT_SECONDS must be greater than zero."
+            )
+        if self.remote_sync.enabled:
+            if not self.remote_sync.base_url:
+                raise ConfigError(
+                    "ATTENDANCE_REMOTE_BASE_URL is required when remote sync is enabled."
+                )
+            if not self.remote_sync.ingest_token:
+                raise ConfigError(
+                    "ATTENDANCE_REMOTE_INGEST_TOKEN is required when remote sync is enabled."
+                )
         if not self.lease_file_path:
             raise ConfigError("ATTENDANCE_LEASE_FILE_PATH is required.")
         _ = self.timezone
