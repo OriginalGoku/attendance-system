@@ -1,0 +1,4 @@
+4102444800 aa:bb:cc:dd:ee:ff 192.168.50.20 john-iphone *
+4102444800 11:22:33:44:55:66 192.168.50.21 jane-phone *
+4102444800 77:88:99:aa:bb:cc 192.168.50.99 visitor-device *
+malformed line should be ignored

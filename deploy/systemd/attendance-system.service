@@ -1,0 +1,19 @@
+[Unit]
+Description=Wi-Fi Attendance Monitoring Service
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/attendance-system
+EnvironmentFile=/etc/attendance-system/attendance-system.env
+ExecStart=/opt/attendance-system/.venv/bin/attendance-system run
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
