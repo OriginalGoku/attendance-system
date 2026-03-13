@@ -52,14 +52,11 @@ class AttendanceStore(Protocol):
 
 
 class RemoteAttendanceSync(Protocol):
-    def send_session_opened(
-        self, session: AttendanceSession, employee: Employee
-    ) -> None: ...
+    def send_session_opened(self, session: AttendanceSession) -> None: ...
 
     def send_session_closed(
         self,
         session: AttendanceSession,
-        employee: Employee,
         *,
         closed_at: datetime,
     ) -> None: ...

@@ -109,10 +109,21 @@ class AppConfig:
             password=os.getenv("ATTENDANCE_DB_PASSWORD", ""),
             name=os.getenv("ATTENDANCE_DB_NAME", "attendance_system"),
         )
+        # SERVER_BASE_URL / ATTENDANCE_SYSTEM_INGEST_SECRET are the canonical
+        # names going forward.  The older ATTENDANCE_REMOTE_* names are kept as
+        # fallbacks so existing .env files continue to work without changes.
+        base_url = (
+            os.getenv("SERVER_BASE_URL")
+            or os.getenv("ATTENDANCE_REMOTE_BASE_URL", "")
+        ).strip()
+        ingest_token = (
+            os.getenv("ATTENDANCE_SYSTEM_INGEST_SECRET")
+            or os.getenv("ATTENDANCE_REMOTE_INGEST_TOKEN", "")
+        ).strip()
         remote_sync = RemoteSyncConfig(
             enabled=_get_bool("ATTENDANCE_REMOTE_SYNC_ENABLED", False),
-            base_url=os.getenv("ATTENDANCE_REMOTE_BASE_URL", "").strip(),
-            ingest_token=os.getenv("ATTENDANCE_REMOTE_INGEST_TOKEN", "").strip(),
+            base_url=base_url,
+            ingest_token=ingest_token,
             timeout_seconds=_get_int("ATTENDANCE_REMOTE_TIMEOUT_SECONDS", 10),
         )
         config = cls(

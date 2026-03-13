@@ -212,6 +212,40 @@ class MysqlAttendanceStore:
                     ),
                 )
 
+    def sync_employees_from_whitelist(self, entries: list[dict]) -> None:
+        """Upsert employees from the server whitelist and deactivate removed ones.
+
+        ``entries`` is the ``data`` list from the GET mac-addresses response.
+        Employees whose MACs are no longer in the list are marked inactive so
+        the attendance engine stops tracking them.
+        """
+        macs = [e["macAddress"].lower() for e in entries]
+        with self.connection_factory.transaction() as connection:
+            with connection.cursor() as cursor:
+                for entry in entries:
+                    mac = entry["macAddress"].lower()
+                    name = entry.get("staffName", mac)
+                    cursor.execute(
+                        """
+                        INSERT INTO employees (name, telegram_id, mac_address, active)
+                        VALUES (%s, '', %s, 1)
+                        ON DUPLICATE KEY UPDATE name = VALUES(name), active = 1
+                        """,
+                        (name, mac),
+                    )
+                # Deactivate employees not in the current whitelist.
+                if macs:
+                    placeholders = ", ".join(["%s"] * len(macs))
+                    cursor.execute(
+                        f"""
+                        UPDATE employees SET active = 0
+                        WHERE mac_address NOT IN ({placeholders})
+                        """,
+                        macs,
+                    )
+                else:
+                    cursor.execute("UPDATE employees SET active = 0")
+
     def create_employee(
         self, *, name: str, telegram_id: str, mac_address: str, active: bool = True
     ) -> int:

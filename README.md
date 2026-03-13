@@ -2,14 +2,12 @@
 
 `attendance-system` is a local-first Python service that infers staff attendance from devices connected to a dedicated Wi-Fi hotspot named `Site-Staff`.
 
-The intended production environment is a Raspberry Pi running Raspberry Pi OS Bookworm where:
+The production environment is a Raspberry Pi running Raspberry Pi OS Bookworm where:
 
 - `wlan0` hosts the `Site-Staff` hotspot
 - `eth0` provides internet uplink
 - staff phones join the hotspot
 - device presence is translated into attendance sessions
-
-This repository is designed to be developed on a normal laptop first. The first implementation uses a lease-file parser so the core business logic is testable without Raspberry Pi hardware.
 
 ## How Attendance Is Inferred
 
@@ -39,16 +37,21 @@ Employees must disable private/random MAC addressing for the `Site-Staff` SSID o
 ## Project Structure
 
 ```text
-attendance_raspberry_pi/
+attendance-system/
 ├── .env.example
 ├── .gitignore
 ├── README.md
+├── deploy/
+│   └── systemd/
+│       ├── attendance-system.env.example
+│       └── attendance-system.service
 ├── fixtures/
 │   ├── sample_leases_empty.txt
 │   ├── sample_leases_multiple_devices.txt
 │   └── sample_leases_one_device.txt
 ├── pyproject.toml
 ├── scripts/
+│   ├── install_systemd_service.sh
 │   └── simulate_lease_changes.py
 ├── sql/
 │   ├── schema.sql
@@ -87,7 +90,7 @@ attendance_raspberry_pi/
 ### 1. Create a virtual environment
 
 ```bash
-python3.11 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 ```
 
@@ -121,7 +124,7 @@ Edit `.env` and update:
 - `ATTENDANCE_REMOTE_INGEST_TOKEN`
 - `ATTENDANCE_REMOTE_TIMEOUT_SECONDS`
 
-The default timezone in this scaffold is `America/Toronto`.
+The default timezone is `America/Toronto`.
 
 ## Remote Sync To `telegram_manager`
 
@@ -159,13 +162,11 @@ If remote sync fails:
 
 If an employee has no `telegram_id`, remote sync is skipped and a warning is logged.
 
-## MySQL Setup
+## MySQL / MariaDB Setup
 
-This project targets native MySQL for local development.
+This project uses MariaDB on Raspberry Pi OS Bookworm (compatible with MySQL).
 
 ### 1. Create the database and user
-
-Example:
 
 ```sql
 CREATE DATABASE attendance_system CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -186,7 +187,7 @@ mysql -u attendance_user -p attendance_system < sql/schema.sql
 mysql -u attendance_user -p attendance_system < sql/seed_example.sql
 ```
 
-## Running Locally
+## CLI Reference
 
 ### Validate configuration
 
@@ -229,7 +230,7 @@ attendance-system close-stale-sessions --minutes 240
 
 ## Local Simulation
 
-The initial presence source reads a lease file with lines in this format:
+The presence source reads a dnsmasq-format lease file with lines in this format:
 
 ```text
 <expiry_epoch> <mac> <ip> <hostname> <client_id>
@@ -281,43 +282,65 @@ The service logs:
 - unknown devices
 - polling loop errors
 
-## Deployment Direction For Raspberry Pi
+## Raspberry Pi Deployment
 
-This repository keeps the attendance engine decoupled from Raspberry Pi shell commands, but it now includes deployment artifacts for running the service under `systemd` on Raspberry Pi OS Bookworm.
+### Hotspot configuration
 
-Future production presence-source work will add implementations for:
+The hotspot is managed by NetworkManager. The `site-ap` connection profile runs
+`wlan0` as an access point in `ipv4.method: shared` mode, which causes NetworkManager
+to spawn an internal dnsmasq instance for DHCP on the `192.168.50.0/24` range.
 
-- `iw dev wlan0 station dump`
-- `ip neigh`
-- NetworkManager shared hotspot lease sources
-- combined multi-source reconciliation
+Key facts about the hotspot setup:
 
-The current abstraction layer allows those adapters to be added without changing the attendance engine.
+- SSID: `Site-Staff`
+- Interface: `wlan0`
+- Gateway / Pi IP: `192.168.50.1`
+- DHCP range: `192.168.50.10 – 192.168.50.254`
+- Lease time: 3600 seconds
 
-## Raspberry Pi Deployment With systemd
+### Lease file
 
-The repository now includes:
+NetworkManager writes DHCP leases for hotspot clients to:
 
-- [attendance-system.service](/Users/god/vs_code/attendance_raspberry_pi/deploy/systemd/attendance-system.service)
-- [attendance-system.env.example](/Users/god/vs_code/attendance_raspberry_pi/deploy/systemd/attendance-system.env.example)
-- [install_systemd_service.sh](/Users/god/vs_code/attendance_raspberry_pi/scripts/install_systemd_service.sh)
+```
+/var/lib/NetworkManager/dnsmasq-wlan0.leases
+```
 
-Suggested Raspberry Pi deployment flow:
+This is the authoritative presence source. Do **not** use `/var/lib/misc/dnsmasq.leases`;
+the standalone `dnsmasq` service conflicts with NetworkManager's internal instance and
+fails to start, so that file is stale.
 
-1. Install Python and MySQL client dependencies on Raspberry Pi OS Bookworm.
-2. Clone this repository to the Raspberry Pi, for example under `/opt/attendance-system`.
-3. Create the virtual environment and install the package:
+> **Note:** The `/var/lib/NetworkManager/` directory is owned by root with mode `700`.
+> Even though the lease file itself is world-readable, non-root processes cannot traverse
+> the directory without an explicit ACL. See the ACL step below.
+
+### Full deployment procedure
+
+#### 1. Clone the repository
 
 ```bash
+sudo mkdir -p /opt/attendance-system
+sudo chown $USER:$USER /opt/attendance-system
+git clone <repo-url> /opt/attendance-system
 cd /opt/attendance-system
+```
+
+#### 2. Create the virtual environment and install
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -e .
 ```
 
-4. Configure hotspot networking for `Site-Staff` on `wlan0`.
-5. Copy and edit the production environment file:
+#### 3. Apply the database schema
+
+```bash
+mysql -u attendance_user -pchange_me -h 127.0.0.1 attendance_system < sql/schema.sql
+```
+
+#### 4. Create the runtime environment file
 
 ```bash
 sudo mkdir -p /etc/attendance-system
@@ -325,8 +348,63 @@ sudo cp deploy/systemd/attendance-system.env.example /etc/attendance-system/atte
 sudo nano /etc/attendance-system/attendance-system.env
 ```
 
-6. Update the lease-file path or future production presence-source configuration.
-7. Install and enable the service:
+Set at minimum:
+
+```ini
+ATTENDANCE_LEASE_FILE_PATH=/var/lib/NetworkManager/dnsmasq-wlan0.leases
+ATTENDANCE_DB_PASSWORD=<your-password>
+```
+
+#### 5. Grant lease-file access to the service user
+
+The service runs as a non-root user. Grant it execute (traverse) access to the
+NetworkManager directory so it can read the world-readable lease file:
+
+```bash
+sudo setfacl -m u:<service-user>:x /var/lib/NetworkManager/
+```
+
+To make this survive reboots, install the provided helper unit:
+
+```bash
+sudo cp /etc/systemd/system/nm-lease-acl.service /etc/systemd/system/nm-lease-acl.service
+```
+
+Or create `/etc/systemd/system/nm-lease-acl.service` manually:
+
+```ini
+[Unit]
+Description=Grant attendance service access to NetworkManager dnsmasq lease directory
+After=NetworkManager.service
+Before=attendance-system.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/setfacl -m u:<service-user>:x /var/lib/NetworkManager/
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable nm-lease-acl.service
+```
+
+#### 6. Edit the service unit for your username
+
+Open `deploy/systemd/attendance-system.service` and set `User` and `Group` to the
+account that owns the project (the default placeholder is `pi`):
+
+```ini
+User=<your-username>
+Group=<your-username>
+```
+
+#### 7. Install and enable the attendance service
 
 ```bash
 chmod +x scripts/install_systemd_service.sh
@@ -335,26 +413,53 @@ sudo systemctl start attendance-system.service
 sudo systemctl status attendance-system.service
 ```
 
-8. Inspect runtime logs:
+#### 8. Seed employee records
 
 ```bash
+source .venv/bin/activate
+attendance-system seed-employee \
+  --name "Jane Smith" \
+  --telegram-id "987654321" \
+  --mac-address "aa:bb:cc:dd:ee:ff"
+```
+
+#### 9. Verify operation
+
+```bash
+# Check lease file is being parsed
+attendance-system parse-leases
+
+# Run one cycle manually
+attendance-system run-once
+
+# Follow live logs
 journalctl -u attendance-system.service -f
 ```
 
-9. Integrate with the future Telegram application.
+### Service unit summary
 
-The provided unit file expects:
+| Setting | Value |
+|---|---|
+| Unit file (source) | `deploy/systemd/attendance-system.service` |
+| Unit file (installed) | `/etc/systemd/system/attendance-system.service` |
+| Environment file | `/etc/attendance-system/attendance-system.env` |
+| Working directory | `/opt/attendance-system` |
+| Executable | `/opt/attendance-system/.venv/bin/attendance-system` |
+| Restart policy | `always`, 5 s back-off |
 
-- application code at `/opt/attendance-system`
-- virtual environment at `/opt/attendance-system/.venv`
-- environment file at `/etc/attendance-system/attendance-system.env`
+### Known constraints and risks
 
-Adjust these paths if you deploy elsewhere.
+| Item | Detail |
+|---|---|
+| ACL resets on NM directory recreation | If a package upgrade recreates `/var/lib/NetworkManager/`, the ACL is lost mid-session. It is reapplied automatically on the next reboot via `nm-lease-acl.service`. |
+| Lease file path is interface-bound | If `wlan0` is renamed or the NM connection is recreated, NM writes to a different filename (e.g. `dnsmasq-wlan1.leases`). Update `ATTENDANCE_LEASE_FILE_PATH` if the interface name changes. |
+| Standalone dnsmasq conflict | The system package `dnsmasq.service` is enabled but fails to start because NetworkManager already owns the DHCP port. This is expected. Consider running `sudo systemctl disable dnsmasq` to suppress the noise in system logs. |
+| MAC randomization | Employees must disable private/random MAC for the `Site-Staff` SSID before registering their device MAC. |
 
 ## Assumptions
 
 - MAC addresses are the primary identity key for devices.
 - MAC addresses are normalized to lowercase before any comparison or persistence.
-- Attendance timestamps are stored in MySQL as UTC `DATETIME(6)` values.
+- Attendance timestamps are stored as UTC `DATETIME(6)` values.
 - The application timezone is configured as `America/Toronto` for operational use.
 - A single open attendance session per device is enforced by application logic.

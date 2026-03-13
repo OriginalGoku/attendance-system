@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
+User=lordgoku
+Group=lordgoku
 WorkingDirectory=/opt/attendance-system
 EnvironmentFile=/etc/attendance-system/attendance-system.env
 ExecStart=/opt/attendance-system/.venv/bin/attendance-system run

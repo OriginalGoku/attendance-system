@@ -3,12 +3,16 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from attendance_system.config import AppConfig
 from attendance_system.models import AttendanceSession, DevicePresence, Employee
 from attendance_system.presence.base import PresenceSource
 from attendance_system.types import AttendanceStore, RemoteAttendanceSync
 from attendance_system.utils.time import now_utc
+
+if TYPE_CHECKING:
+    from attendance_system.services.discovery_broadcast import DiscoveryBroadcastService
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +27,22 @@ class AttendanceEngine:
         presence_source: PresenceSource,
         store: AttendanceStore,
         remote_sync: RemoteAttendanceSync | None = None,
+        discovery_broadcast: DiscoveryBroadcastService | None = None,
     ) -> None:
         self.config = config
         self.presence_source = presence_source
         self.store = store
         self.remote_sync = remote_sync
+        self.discovery_broadcast = discovery_broadcast
         self.pending_exits: dict[str, datetime] = {}
 
     def run_cycle(self, current_time: datetime | None = None) -> None:
         cycle_time = current_time or now_utc()
         devices = self._deduplicate_devices(self.presence_source.scan())
+
+        if self.discovery_broadcast is not None:
+            self.discovery_broadcast.update_scan_result(list(devices.values()))
+
         open_sessions = {
             session.mac_address: session for session in self.store.list_open_sessions()
         }
@@ -190,7 +200,7 @@ class AttendanceEngine:
         if self.remote_sync is None:
             return
         try:
-            self.remote_sync.send_session_opened(session, employee)
+            self.remote_sync.send_session_opened(session)
         except Exception:
             logger.exception(
                 "Remote attendance sync raised unexpectedly during session open.",
@@ -207,11 +217,7 @@ class AttendanceEngine:
         if self.remote_sync is None:
             return
         try:
-            self.remote_sync.send_session_closed(
-                session,
-                employee,
-                closed_at=closed_at,
-            )
+            self.remote_sync.send_session_closed(session, closed_at=closed_at)
         except Exception:
             logger.exception(
                 "Remote attendance sync raised unexpectedly during session close.",
