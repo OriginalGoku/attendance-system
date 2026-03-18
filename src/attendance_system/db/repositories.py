@@ -25,7 +25,7 @@ def _employee_from_row(row: dict[str, Any]) -> Employee:
 def _session_from_row(row: dict[str, Any]) -> AttendanceSession:
     return AttendanceSession(
         id=int(row["id"]),
-        employee_id=int(row["employee_id"]),
+        employee_id=int(row["employee_id"]) if row["employee_id"] is not None else None,
         mac_address=str(row["mac_address"]),
         ip_address=row["ip_address"],
         hostname=row["hostname"],
@@ -97,7 +97,7 @@ class MysqlAttendanceStore:
 
     def create_session(
         self,
-        employee: Employee,
+        employee: Employee | None,
         device: DevicePresence,
         entry_time: datetime,
     ) -> AttendanceSession:
@@ -112,7 +112,7 @@ class MysqlAttendanceStore:
                     VALUES (%s, %s, %s, %s, %s, %s, NULL, 'open')
                     """,
                     (
-                        employee.id,
+                        employee.id if employee is not None else None,
                         device.mac_address,
                         device.ip_address,
                         device.hostname,

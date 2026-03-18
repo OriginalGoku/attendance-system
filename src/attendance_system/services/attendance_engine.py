@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from attendance_system.config import AppConfig
-from attendance_system.models import AttendanceSession, DevicePresence, Employee
+from attendance_system.models import AttendanceSession, DevicePresence
 from attendance_system.presence.base import PresenceSource
 from attendance_system.types import AttendanceStore, RemoteAttendanceSync
 from attendance_system.utils.time import now_utc
@@ -50,29 +50,10 @@ class AttendanceEngine:
 
         for mac_address, device in devices.items():
             employee = employees.get(mac_address)
-            if employee is None:
-                if self.config.log_unknown_devices:
-                    self.store.log_raw_event(
-                        employee_id=None,
-                        mac_address=mac_address,
-                        ip_address=device.ip_address,
-                        hostname=device.hostname,
-                        event_type="unknown_device",
-                        event_time=cycle_time,
-                        metadata={"source": device.source},
-                    )
-                    logger.info(
-                        "Unknown device detected.",
-                        extra={
-                            "mac_address": mac_address,
-                            "ip_address": device.ip_address,
-                            "hostname": device.hostname,
-                        },
-                    )
-                continue
+            employee_id = employee.id if employee is not None else None
 
             self.store.log_raw_event(
-                employee_id=employee.id,
+                employee_id=employee_id,
                 mac_address=mac_address,
                 ip_address=device.ip_address,
                 hostname=device.hostname,
@@ -90,7 +71,7 @@ class AttendanceEngine:
                 )
                 open_sessions[mac_address] = session
                 self.store.log_raw_event(
-                    employee_id=employee.id,
+                    employee_id=employee_id,
                     mac_address=mac_address,
                     ip_address=device.ip_address,
                     hostname=device.hostname,
@@ -101,13 +82,13 @@ class AttendanceEngine:
                 logger.info(
                     "Opened attendance session.",
                     extra={
-                        "employee_id": employee.id,
-                        "employee_name": employee.name,
+                        "employee_id": employee_id,
+                        "employee_name": employee.name if employee is not None else None,
                         "session_id": session.id,
                         "mac_address": mac_address,
                     },
                 )
-                self._best_effort_sync_open(session, employee)
+                self._best_effort_sync_open(session)
             else:
                 self.store.touch_session(
                     session_id=existing_session.id,
@@ -166,7 +147,6 @@ class AttendanceEngine:
                 continue
 
             if cycle_time - missing_since >= grace_period:
-                employee = self.store.get_employee_by_id(session.employee_id)
                 self.store.close_session(session.id, cycle_time)
                 self.store.log_raw_event(
                     employee_id=session.employee_id,
@@ -181,10 +161,7 @@ class AttendanceEngine:
                     },
                 )
                 self.pending_exits.pop(mac_address, None)
-                if employee is not None:
-                    self._best_effort_sync_close(
-                        session, employee, closed_at=cycle_time
-                    )
+                self._best_effort_sync_close(session, closed_at=cycle_time)
                 logger.info(
                     "Closed attendance session.",
                     extra={
@@ -194,9 +171,7 @@ class AttendanceEngine:
                     },
                 )
 
-    def _best_effort_sync_open(
-        self, session: AttendanceSession, employee: Employee
-    ) -> None:
+    def _best_effort_sync_open(self, session: AttendanceSession) -> None:
         if self.remote_sync is None:
             return
         try:
@@ -204,13 +179,12 @@ class AttendanceEngine:
         except Exception:
             logger.exception(
                 "Remote attendance sync raised unexpectedly during session open.",
-                extra={"session_id": session.id, "employee_id": employee.id},
+                extra={"session_id": session.id},
             )
 
     def _best_effort_sync_close(
         self,
         session: AttendanceSession,
-        employee: Employee,
         *,
         closed_at: datetime,
     ) -> None:
@@ -221,7 +195,7 @@ class AttendanceEngine:
         except Exception:
             logger.exception(
                 "Remote attendance sync raised unexpectedly during session close.",
-                extra={"session_id": session.id, "employee_id": employee.id},
+                extra={"session_id": session.id},
             )
 
     @staticmethod

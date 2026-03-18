@@ -55,10 +55,10 @@ def build_store(config: AppConfig) -> MysqlAttendanceStore:
     return MysqlAttendanceStore(DatabaseConnectionFactory(config.database))
 
 
-def build_remote_sync_client(config: AppConfig, whitelist=None):
+def build_remote_sync_client(config: AppConfig):
     from attendance_system.services.remote_sync import RemoteAttendanceSyncClient
 
-    return RemoteAttendanceSyncClient(config.remote_sync, whitelist=whitelist)
+    return RemoteAttendanceSyncClient(config.remote_sync)
 
 
 def main() -> int:
@@ -104,14 +104,9 @@ def main() -> int:
         print(f"Closed {closed} stale open session(s).")
         return 0
 
-    whitelist_sync = None
     discovery_broadcast = None
     if config.remote_sync.enabled:
-        from attendance_system.services.whitelist_sync import WhitelistSyncService
         from attendance_system.services.discovery_broadcast import DiscoveryBroadcastService
-
-        whitelist_sync = WhitelistSyncService(config.remote_sync, store)
-        whitelist_sync.start()
 
         discovery_broadcast = DiscoveryBroadcastService(config.remote_sync)
         discovery_broadcast.start()
@@ -120,7 +115,7 @@ def main() -> int:
         config=config,
         presence_source=build_presence_source(config),
         store=store,
-        remote_sync=build_remote_sync_client(config, whitelist=whitelist_sync),
+        remote_sync=build_remote_sync_client(config),
         discovery_broadcast=discovery_broadcast,
     )
 

@@ -4,15 +4,12 @@ import json
 import logging
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib import error, request
 
 from attendance_system.config import RemoteSyncConfig
 from attendance_system.models import AttendanceSession
 from attendance_system.utils.time import format_utc_timestamp
-
-if TYPE_CHECKING:
-    from attendance_system.services.whitelist_sync import WhitelistSyncService
 
 logger = logging.getLogger(__name__)
 
@@ -60,20 +57,16 @@ def build_exit_payload(
 class RemoteAttendanceSyncClient:
     """Best-effort HTTP client for the remote attendance-system ingest endpoint.
 
-    * Drops ``telegramUserId`` — the server resolves staff from MAC address.
-    * Only pushes events for MACs present in the current server whitelist.
+    * Forwards ALL session open/close events regardless of MAC address — the
+      remote server is responsible for deciding what to do with each device.
     * Retries transient errors (network / 5xx) with exponential backoff.
-    * On HTTP 404 (MAC de-registered) logs a warning and triggers an immediate
-      whitelist re-sync so the local list stays current.
     """
 
     def __init__(
         self,
         config: RemoteSyncConfig,
-        whitelist: WhitelistSyncService | None = None,
     ) -> None:
         self.config = config
-        self._whitelist = whitelist
         self._endpoint = (
             f"{self.config.base_url.rstrip('/')}/api/integrations/attendance-system/events"
             if self.config.base_url
@@ -85,8 +78,6 @@ class RemoteAttendanceSyncClient:
     # ------------------------------------------------------------------
 
     def send_session_opened(self, session: AttendanceSession) -> None:
-        if not self._mac_is_whitelisted(session.mac_address):
-            return
         self.send_event(build_entry_payload(session))
 
     def send_session_closed(
@@ -95,8 +86,6 @@ class RemoteAttendanceSyncClient:
         *,
         closed_at: datetime,
     ) -> None:
-        if not self._mac_is_whitelisted(session.mac_address):
-            return
         self.send_event(build_exit_payload(session, closed_at=closed_at))
 
     # ------------------------------------------------------------------
@@ -119,11 +108,9 @@ class RemoteAttendanceSyncClient:
             except error.HTTPError as exc:
                 if exc.code == 404:
                     logger.warning(
-                        "MAC not registered on server — skipping event and triggering whitelist re-sync.",
+                        "Server returned 404 for event push — endpoint may be misconfigured.",
                         extra={"source_event_id": source_event_id, "mac_address": mac},
                     )
-                    if self._whitelist is not None:
-                        self._whitelist.trigger_immediate_sync()
                     return  # do not retry 404s
                 if exc.code >= 500:
                     logger.warning(
@@ -201,9 +188,3 @@ class RemoteAttendanceSyncClient:
             extra={"source_event_id": source_event_id, "mac_address": mac},
         )
 
-    def _mac_is_whitelisted(self, mac: str) -> bool:
-        if not self.config.enabled:
-            return False
-        if self._whitelist is None:
-            return True  # no whitelist service — allow all (e.g. testing)
-        return mac.lower() in self._whitelist.get_whitelist()

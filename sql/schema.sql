@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS employees (
 
 CREATE TABLE IF NOT EXISTS attendance_sessions (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    employee_id BIGINT UNSIGNED NOT NULL,
+    employee_id BIGINT UNSIGNED NULL,
     mac_address CHAR(17) NOT NULL,
     ip_address VARCHAR(45) NULL,
     hostname VARCHAR(255) NULL,

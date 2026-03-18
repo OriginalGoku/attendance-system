@@ -11,28 +11,21 @@ The production environment is a Raspberry Pi running Raspberry Pi OS Bookworm wh
 
 ## How Attendance Is Inferred
 
-Each employee is identified by:
-
-- employee name
-- Telegram ID
-- registered device MAC address
-
 Attendance logic:
 
-1. A registered device appears in the hotspot presence source.
-2. The system opens an attendance session and logs raw audit events.
-3. Repeated polls while the device remains connected only update `last_seen`.
-4. If the device disappears, the system starts a grace-period timer.
-5. If the device returns before the grace period expires, the session stays open.
-6. If the device is still absent after the grace period, the system closes the session.
+1. Any device that connects to the hotspot opens an attendance session.
+2. Repeated polls while the device remains connected only update `last_seen`.
+3. If the device disappears, the system starts a grace-period timer.
+4. If the device returns before the grace period expires, the session stays open.
+5. If the device is still absent after the grace period, the session closes.
 
-Unknown devices are logged to the raw event table but do not open attendance sessions.
+No local employee registry is required. The system forwards `in`/`out` events for **every MAC address** to the remote server, which is responsible for resolving devices to staff. All events are also persisted locally in MySQL.
 
 ## Important Device Requirement
 
 This design assumes MAC addresses remain stable.
 
-Employees must disable private/random MAC addressing for the `Site-Staff` SSID on their phones. If they do not, the attendance system cannot reliably map the phone to the employee registry.
+Staff must disable private/random MAC addressing for the `Site-Staff` SSID on their phones. If they do not, each reconnection will appear as a new unknown device.
 
 ## Project Structure
 
@@ -128,8 +121,10 @@ The default timezone is `America/Toronto`.
 
 ## Remote Sync To `telegram_manager`
 
-The Pi remains responsible for local attendance detection and local MySQL persistence.
-An optional one-way sync can forward session boundary events to the remote `telegram_manager` app.
+The Pi is responsible for local attendance detection and local MySQL persistence.
+An optional one-way sync forwards session boundary events to the remote `telegram_manager` app.
+
+Events are sent for **every device** that connects or disconnects — no pre-registration on the Pi is required. The remote server decides how to handle each MAC address.
 
 Remote sync behavior:
 
@@ -143,15 +138,15 @@ Remote sync configuration:
 
 ```env
 ATTENDANCE_REMOTE_SYNC_ENABLED=true
-ATTENDANCE_REMOTE_BASE_URL=https://your-telegram-manager.example.com
-ATTENDANCE_REMOTE_INGEST_TOKEN=your-app-level-bearer-token
+SERVER_BASE_URL=https://your-telegram-manager.example.com
+ATTENDANCE_SYSTEM_INGEST_SECRET=your-app-level-bearer-token
 ATTENDANCE_REMOTE_TIMEOUT_SECONDS=10
 ```
 
 Remote request contract:
 
 - method: `POST`
-- URL: `https://<telegram-manager-base-url>/api/integrations/attendance-system/events`
+- URL: `https://<SERVER_BASE_URL>/api/integrations/attendance-system/events`
 - header: `Authorization: Bearer <ATTENDANCE_SYSTEM_INGEST_SECRET>`
 
 If remote sync fails:
@@ -159,8 +154,6 @@ If remote sync fails:
 - local MySQL attendance behavior still succeeds
 - the polling cycle continues
 - a structured error is logged
-
-If an employee has no `telegram_id`, remote sync is skipped and a warning is logged.
 
 ## MySQL / MariaDB Setup
 

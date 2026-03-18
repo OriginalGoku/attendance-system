@@ -20,7 +20,7 @@ class AttendanceStore(Protocol):
 
     def create_session(
         self,
-        employee: Employee,
+        employee: Employee | None,
         device: DevicePresence,
         entry_time: datetime,
     ) -> AttendanceSession: ...

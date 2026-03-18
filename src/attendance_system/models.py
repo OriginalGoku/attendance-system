@@ -20,7 +20,7 @@ class Employee:
 @dataclass(slots=True)
 class AttendanceSession:
     id: int
-    employee_id: int
+    employee_id: int | None
     mac_address: str
     ip_address: str | None
     hostname: str | None
